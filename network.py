@@ -1,70 +1,71 @@
-
-# Pulled over form notebook.
-
-# Refactor!!!! XXX
-
-# Get the tweets
-
+# Originally from 
+# https://github.com/Lasagne/Recipes/blob/master/examples/lstm_text_generation.py
+import numpy as np
+import theano
+import theano.tensor as T
+import lasagne
+from lasagne.layers import InputLayer, LSTMLayer, DropoutLayer, DenseLayer
+from lasagne.nonlinearities import tanh, softmax
+from lasagne.objectives import categorical_crossentropy
+from lasagne.updates import adagrad
+import pickle
+import itertools
+from collections import OrderedDict
 import pandas as pd
 import html
 import codecs
-
-tweets_info = pd.read_csv("realDonaldTrump_tweets.csv", dtype=bytes)
-
-tweets = [html.unescape(x) for x in tweets_info['text']]
-
-# See what we are dealing with
 from collections import Counter
 import numpy as np
-c = Counter()
-for twt in tweets:
-    c.update(twt)
-counts = c.most_common()
-print(len(counts))
-print(counts[:5])
-print(max([len(x) for x in tweets]))
+import warnings
+from nolearn.lasagne import NeuralNet, TrainSplit, BatchIterator
+# See https://groups.google.com/forum/#!msg/lasagne-users/jtXB62wd7mQ/_whqLPgsIQAJ
+warnings.filterwarnings('ignore', 'In the strict mode,.+')
+# Because we are using no validation data, we get the following runtime warning.
+warnings.filterwarnings('ignore', 'Mean of empty slice.')
 
-# Map characters to tokens and vice versa. Add special START and STOP
-# tokens.
+SEQ_LENGTH = 50
 
-chars_to_tokens = {}
-for i, (c, cnt) in enumerate(counts):
-    chars_to_tokens[c] = i
-chars_to_tokens["START"] = i+1
-chars_to_tokens["STOP"] = i+2
-
-tokens_to_chars = [None] * len(chars_to_tokens)
-for k, v in chars_to_tokens.items():
-    tokens_to_chars[v] = k
-
-SEQ_LENGTH = 20
-
-# Batch Size
 BATCH_SIZE = 128
 
-SYMBOL_COUNT = len(tokens_to_chars)
-def encode(char):
-    vec = np.zeros([SYMBOL_COUNT], dtype='float32')
-    vec[ chars_to_tokens[char] ] = 1
-    return vec
- 
-# def gen_data_chunk():
-#     """yield a sequence of training data based on the tweets"""
-#     while True:
-#         twt = np.random.choice(tweets)
-#         # Encode the whole tweet since they aren't that long
-#         all_chars = ["START"] * SEQ_LENGTH + list(twt) + ["STOP"]
-#         # Now yield values for each chunk
-#         i = np.random.randint(len(all_chars)-SEQ_LENGTH)
-#         chars = all_chars[i:i+SEQ_LENGTH]
-#         token = chars_to_tokens[ all_chars[i+SEQ_LENGTH] ]
-#         vectors = np.zeros([SEQ_LENGTH, SYMBOL_COUNT], dtype=int)
-#         assert len(chars) == SEQ_LENGTH
-#         for j, c in enumerate(chars):
-#             vectors[j] = encode(c)
-#         yield i, token, vectors
- 
+TWITTER_LIMIT = 140
 
+
+
+def read_tweets(path):
+    tweets_info = pd.read_csv(path, dtype=bytes)
+    return [html.unescape(x) for x in tweets_info['text']]
+
+def make_token_maps(tweets):
+    c = Counter()
+    for twt in tweets:
+        c.update(twt)
+    counts = c.most_common()
+    # Map characters to tokens and vice versa. Add special START and STOP
+    # tokens.
+    char_to_token = {}
+    for i, (c, cnt) in enumerate(counts):
+        char_to_token[c] = i
+    char_to_token["START"] = i+1
+    char_to_token["STOP"] = i+2
+    #
+    token_to_char = [None] * len(char_to_token)
+    for k, v in char_to_token.items():
+        token_to_char[v] = k
+    return token_to_char, char_to_token
+    
+tweets = read_tweets("realDonaldTrump_tweets.csv")
+token_to_char, char_to_token = make_token_maps(tweets)
+
+symbol_count = len(token_to_char)
+
+
+
+def encode(char):
+    vec = np.zeros([symbol_count], dtype='float32')
+    vec[ char_to_token[char] ] = 1
+    return vec
+    
+ 
 def gen_data_chunk(seed=1234):
     """yield a sequence of training data based on the tweets"""
     np.random.seed(seed)
@@ -77,8 +78,8 @@ def gen_data_chunk(seed=1234):
             # Now yield values for each chunk
             for i in range(len(all_chars)-SEQ_LENGTH):
                 chars = all_chars[i:i+SEQ_LENGTH]
-                token = chars_to_tokens[ all_chars[i+SEQ_LENGTH] ]
-                vectors = np.zeros([SEQ_LENGTH, SYMBOL_COUNT], dtype=int)
+                token = char_to_token[ all_chars[i+SEQ_LENGTH] ]
+                vectors = np.zeros([SEQ_LENGTH, symbol_count], dtype=int)
                 assert len(chars) == SEQ_LENGTH
                 for j, c in enumerate(chars):
                     vectors[j] = encode(c)
@@ -86,31 +87,12 @@ def gen_data_chunk(seed=1234):
     
 generator = gen_data_chunk()
 
-# Originally from 
-# https://github.com/Lasagne/Recipes/blob/master/examples/lstm_text_generation.py
-import numpy as np
-import theano
-import theano.tensor as T
-import lasagne
-import pickle
-import itertools
-from collections import OrderedDict
-
-import warnings
-# See https://groups.google.com/forum/#!msg/lasagne-users/jtXB62wd7mQ/_whqLPgsIQAJ
-warnings.filterwarnings('ignore', 'In the strict mode,.+')
 
 
-
-char_to_ix = chars_to_tokens
-ix_to_char = tokens_to_chars
-
-#Lasagne Seed for Reproducibility
-lasagne.random.set_rng(np.random.RandomState(1))
 
 
 # Number of units in the two hidden (LSTM) layers
-N_HIDDEN = 128
+N_HIDDEN = 512
 
 # Optimization learning rate
 LEARNING_RATE = 0.01
@@ -119,231 +101,130 @@ LEARNING_RATE = 0.01
 GRAD_CLIP = 100
 
 # How often should we check the output?
-PRINT_FREQ = 50
+PRINT_FREQ = 100
 
 # Number of epochs to train the net
-NUM_EPOCHS = 20
-
+NUM_EPOCHS = 200
 epoch_size = sum(len(x) for x in tweets)
+chunks_per_epoch = int(round(epoch_size / PRINT_FREQ))
 
-TOKEN_COUNT = SYMBOL_COUNT
 
-# DECAY = 1
+token_count = symbol_count + 1
 
 STODGINESS = 2
+FOOTLOOSE_LENGTH = 20
 
-def gen_data():
-    x = np.zeros((BATCH_SIZE,SEQ_LENGTH,TOKEN_COUNT))
-    y = np.zeros(BATCH_SIZE)
-    for i in range(BATCH_SIZE):
+ 
+    
+def gen_data(n):
+    x = np.zeros((n,SEQ_LENGTH,token_count), dtype='float32')
+    y = np.zeros(n, dtype='int32')
+    for i in range(n):
         j, c, v = next(generator)
-        x[i] = v
+        x[i,:,:symbol_count] = v
+        where_in_tweet = j / float(TWITTER_LIMIT - 1)
+        x[i,:,-1] = where_in_tweet
         y[i] = c
     return x, y
     
-class Layers(OrderedDict):
-    def __getitem__(self, key):
-        if isinstance(key, int):
-            return list(self.values()).__getitem__(key)
-        elif isinstance(key, slice):
-            items = list(self.items()).__getitem__(key)
-            return Layers(items)
-        else:
-            return super(Layers, self).__getitem__(key)
-
-    def keys(self):
-        return list(super(Layers, self).keys())
-
-    def values(self):
-        return list(super(Layers, self).values())
     
-start_vector = np.array([[encode("START")] * SEQ_LENGTH])
-
-class Network():
+class MyBatchIterator(BatchIterator):
+    def transform(self, X_indices, y_indices):
+        n = len(X_indices)
+        x, y  = gen_data(n)
+        if y_indices is None:
+            y = None
+        return x, y
     
-    verbose = True
+class OnEpochFinished:
+    def __call__(self, nn, train_history):
+        twt = generate_tweet(network) 
+        print("==>", twt)
+
+
+
+def make_network():
     
-    def __init__(self):
-        self.learning_rate = theano.shared(np.float32(LEARNING_RATE))
+    learning_rate = theano.shared(np.float32(LEARNING_RATE))
 
-        l_in = lasagne.layers.InputLayer(shape=(None, SEQ_LENGTH, TOKEN_COUNT))
-
-        l_forward_1 = lasagne.layers.LSTMLayer(
-            l_in, N_HIDDEN, grad_clipping=GRAD_CLIP,
-            nonlinearity=lasagne.nonlinearities.tanh)
-        
-        l_do_1 = lasagne.layers.DropoutLayer(l_forward_1, p=0.5)
-
-        l_forward_2 = lasagne.layers.LSTMLayer(
-            l_do_1, N_HIDDEN, grad_clipping=GRAD_CLIP,
-            nonlinearity=lasagne.nonlinearities.tanh)
-
-        l_forward_slice = lasagne.layers.SliceLayer(l_forward_2, -1, 1)
-
-        l_do_2 = lasagne.layers.DropoutLayer(l_forward_slice, p=0.5)
-        
-        l_out = lasagne.layers.DenseLayer(l_do_2, 
-                                          num_units=SYMBOL_COUNT, 
-                                          W = lasagne.init.Normal(), 
-                                          nonlinearity=lasagne.nonlinearities.softmax)
-
-
-
-
-        self.set_layers_([l_in, l_forward_1, l_do_1, l_forward_2, 
-                          l_forward_slice, l_do_2, l_out])
-
-        
-        
-        target_values = T.ivector('target_output')
-
-        # lasagne.layers.get_output produces a variable for the output of the net
-        network_output = lasagne.layers.get_output(l_out)
-
-        network_output_p = lasagne.layers.get_output(l_out, deterministic=True)
-        # The loss function is calculated as the mean of the (categorical) 
-        # cross-entropy between the prediction and target.
-        cost = T.nnet.categorical_crossentropy(network_output,target_values).mean()
-
-        # Retrieve all parameters from the network
-        all_params = lasagne.layers.get_all_params(l_out,trainable=True)
-
-        # Compute AdaGrad updates for training
-        print("Computing updates ...")
-        updates = lasagne.updates.adagrad(cost, all_params, self.learning_rate)
-
-        # Theano functions for training and computing cost
-        print("Compiling functions ...")
-        self.train = theano.function([l_in.input_var, target_values], cost, 
-                                updates=updates, allow_input_downcast=True)
-        self.probs = theano.function([l_in.input_var],network_output,allow_input_downcast=True)
-
-    def initialize(self):
-        pass
-        
-    def set_layers_(self, layers):
-        self.layers_ = Layers()
-        names = "l_in l_forward_1 l_do_1 l_forward_2 l_forward_slice l_do_2 l_out".split()
-        for n, l in zip(names, layers):
-            self.layers_[n] = l
-
-    # From nolearn
+    args = dict
+    layers = [(InputLayer, args(name="l_in", shape=(None, SEQ_LENGTH, token_count))),
+              (LSTMLayer, args(name="l_forward_1", num_units=N_HIDDEN, grad_clipping=GRAD_CLIP, 
+                           nonlinearity=tanh)),
+              (DropoutLayer, args(name="l_do_1", p=0.5)),
+              (LSTMLayer, args(name="l_forward_2", num_units=N_HIDDEN, grad_clipping=GRAD_CLIP,
+                            nonlinearity=tanh, only_return_final=True)),
+              (DropoutLayer, args(name="l_do_2", p=0.5)),
+              (DenseLayer, args(name="l_out", num_units=symbol_count, W=lasagne.init.Normal(),
+                             nonlinearity=softmax))]
+    return NeuralNet(
+        y_tensor_type = T.ivector,
+        layers = layers,
+        batch_iterator_train=MyBatchIterator(batch_size=PRINT_FREQ),
+        max_epochs=NUM_EPOCHS * chunks_per_epoch,
+        verbose=1,
+        train_split=TrainSplit(0),
+        objective_loss_function = categorical_crossentropy,
+        update = adagrad, 
+        update_learning_rate = learning_rate,
+        on_epoch_finished=[OnEpochFinished()],
+    )
     
-    def get_all_params_values(self):
-        return_value = OrderedDict()
-        for name, layer in self.layers_.items():
-            return_value[name] = [p.get_value() for p in layer.get_params()]
-        return return_value
 
-    def load_params_from(self, source):
-        self.initialize()
 
-        if isinstance(source, str):
-            with open(source, 'rb') as f:
-                source = pickle.load(f)
-
-#         if isinstance(source, NeuralNet):
-#             source = source.get_all_params_values()
-
-        success = "Loaded parameters to layer '{}' (shape {})."
-        failure = ("Could not load parameters to layer '{}' because "
-                   "shapes did not match: {} vs {}.")
-
-        for key, values in source.items():
-            layer = self.layers_.get(key)
-            if layer is not None:
-                for p1, p2v in zip(layer.get_params(), values):
-                    shape1 = p1.get_value().shape
-                    shape2 = p2v.shape
-                    shape1s = 'x'.join(map(str, shape1))
-                    shape2s = 'x'.join(map(str, shape2))
-                    if shape1 == shape2:
-                        p1.set_value(p2v)
-                        if self.verbose:
-                            print(success.format(
-                                key, shape1s, shape2s))
-                    else:
-                        if self.verbose:
-                            print(failure.format(
-                                key, shape1s, shape2s))
-
-    def save_params_to(self, fname):
-        params = self.get_all_params_values()
-        with open(fname, 'wb') as f:
-            pickle.dump(params, f, -1)
-   
-TWITTER_LIMIT = 140
+start_vector = np.array([[np.concatenate([encode("START"), [0]])] * SEQ_LENGTH], dtype='float32')
 
 # XXX could generate a bunch of tweets in parallel. Just drop stops and keep going.
 def generate_tweet(network, N=144, min_length=64):
-    sample_ix = []
-    x = start_vector
+    chars = []
+    x = start_vector.copy()
     for i in range(TWITTER_LIMIT):
         # Sample from the distribution instead:
-        p = network.probs(x).ravel()
-        if i:
+        p = network.predict_proba(x).ravel()
+        if i <= FOOTLOOSE_LENGTH:
             # After the first symbol we increase the probability of getting the most
             # likely candidates by raising p to STODGINESS. Makes tweets more boring
-            # but more comprehensisble (in theory at least)
+            # but more comprehensible (in theory at least)
             p **= STODGINESS
             p /= p.sum()
-        ix = np.random.choice(np.arange(SYMBOL_COUNT), p=p)
-        if tokens_to_chars[ix] == "STOP":
+            tkn = np.random.choice(np.arange(symbol_count), p=p)
+        else:
+            tkn = np.argmax(p)
+        if token_to_char[tkn] == "STOP":
             # Don't allow short tweets
             if i >= min_length:
                 break
         else:
-            sample_ix.append(ix)
-            x[:,0:SEQ_LENGTH-1,:] = x[:,1:,:]
-            x[:,SEQ_LENGTH-1,:] = 0
-            x[0,SEQ_LENGTH-1,sample_ix[-1]] = 1. 
-
-    return ''.join(ix_to_char[ix] for ix in sample_ix)    
-
-def run(num_epochs=NUM_EPOCHS, network=None):
-    
-    if network is None:
-        network = Network()
-        
+            char = token_to_char[tkn]
+            chars.append(char)
+            x[0,0:SEQ_LENGTH-1,:] = x[:,1:,:]
+            x[0,SEQ_LENGTH-1,:] = 0
+            x[0,SEQ_LENGTH-1, tkn] = 1. 
+            x[0,SEQ_LENGTH-1,-1] = i / float(TWITTER_LIMIT - 1)
+    return ''.join(chars)   
 
 
 
-
-    
-    print("Training ...")
+def load_params(network, path):
     try:
-        for it in itertools.count():
-            
-            twt = generate_tweet(network) # Generate text using the p^th character as the start. 
-            print("----\n %s \n----" % twt)
-
-
-            total_cost = 0;
-            for _ in range(PRINT_FREQ):
-                x, y = gen_data()
-                total_cost += network.train(x, y)
-            epochs = it * BATCH_SIZE * PRINT_FREQ / epoch_size
-            print("Epoch {0} average loss = {1}".format(epochs, total_cost / PRINT_FREQ))
-            if epochs > NUM_EPOCHS:
-                break
-#             network.learning_rate.set_value(np.float32(DECAY * 
-#                                                 network.learning_rate.get_value()))
-            
-    except KeyboardInterrupt:
-        pass
-    return network
-
-
-
-if __name__ == '__main__':
-    network = Network()
-    try:
-        network.load_params_from("network.params_in")
+        network.load_params_from(path)
     except:
         print("couldn't load old params")
+
+def dump_tweets(path, network, param_path, number=128):
+    load_params(network, path=param_path)
+    file = open(path, 'w')
+    for _ in range(number):
+        twt = generate_tweet(network).replace('\n', ' ')
+        file.write(twt+'\n')
+
+if __name__ == '__main__':
+    network = make_network()
+    load_params(network, path="network2.params_in")
     try:
-        run(network=network)
+        dummy_data = [None] * PRINT_FREQ * BATCH_SIZE
+        network.fit(dummy_data, dummy_data)
     except KeyboardInterrupt:
         pass    
-    network.save_params_to("network.params_out")
+    network.save_params_to("network2.params_out")
     
