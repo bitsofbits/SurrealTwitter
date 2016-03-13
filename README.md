@@ -9,11 +9,11 @@ be downloaded from   twitter using a tool such as
 
 To Train:
 
->>> network.fit(dummy_data, dummy_data)
+        >>> network.fit(dummy_data, dummy_data)
 
 To generate tweets:
 
->>> generate_tweets(network, count)
+        >>> generate_tweets(network, count)
 
 Running from the command line will attempt to load existing network data from 
 "network.params" and continue training. When finished training, or interupted,
