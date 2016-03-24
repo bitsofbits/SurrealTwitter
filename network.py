@@ -1,4 +1,30 @@
-# Originally from 
+"""Generate tweets based on the a corpus of source tweets
+
+A character level recurrent neural net is trained to generate tweets in the
+style of a set of existing tweets. 
+
+Source tweets are assumed to be in a column named 'text' in "source_tweets.csv" and can 
+be downloaded from   twitter using a tool such as 
+[tweet_dumper](https://gist.github.com/yanofsky/5436496).
+
+To Train:
+
+>>> network.fit(dummy_data, dummy_data)
+
+To generate tweets:
+
+>>> generate_tweets(network, count)
+
+Running from the command line will attempt to load existing network data from 
+"network.params" and continue training. When finished training, or interupted,
+the current network data is dumped to "network.params_out". If you want to continue
+training with this data next time, this file should be moved to "network.params".
+
+Running dump_tweets(network, count, path) will dump `count` tweets to the locations 
+specified by path.
+
+"""
+# based on 
 # https://github.com/Lasagne/Recipes/blob/master/examples/lstm_text_generation.py
 import numpy as np
 import theano
@@ -48,7 +74,7 @@ def make_token_maps(tweets):
         token_to_char[v] = k
     return np.array(token_to_char), char_to_token
     
-tweets = read_tweets("realDonaldTrump_tweets.csv")
+tweets = read_tweets("source_tweets.csv")
 token_to_char, char_to_token = make_token_maps(tweets)
 
 symbol_count = len(token_to_char)
@@ -123,18 +149,10 @@ MAX_EPOCHS = 200
 # character is chosen and the process becomes deterministic.
 STODGINESS = 2
 
-RANDOM_LENGTH = 20
+RANDOM_LENGTH = 144
 
 epoch_size = sum(len(x) for x in tweets)
 chunks_per_epoch = epoch_size / (CHUNK_SIZE * BATCH_SIZE)
-
-# `token_count` is the number of tokens input to the net. There is one more token than
-# symbol since we also pass in a value that indicates where in the tweet we are since
-# tweet structure varies by location and I want to give the net a chance to learn how
-# to end the tweet cleanly. (XXX in retrospect, token may not be the best terminology,
-# consider renaming).
-token_count = symbol_count + 1
-
 
 #
 # Build the net.
@@ -146,13 +164,11 @@ class MyBatchIterator(BatchIterator):
         self.generator = gen_data_chunk()
     
     def gen_data(self, n):
-        x = np.zeros((n,SEQ_LENGTH,token_count), dtype='float32')
+        x = np.zeros((n,SEQ_LENGTH,symbol_count), dtype='float32')
         y = np.zeros(n, dtype='int32')
         for i in range(n):
             j, c, v = next(self.generator)
-            x[i,:,:symbol_count] = v
-            where_in_tweet = j / float(TWITTER_LIMIT - 1)
-            x[i,:,-1] = where_in_tweet
+            x[i] = v
             y[i] = c
         return x, y
         
@@ -175,7 +191,7 @@ def make_network():
     learning_rate = theano.shared(np.float32(LEARNING_RATE))
 
     args = dict
-    layers = [(InputLayer, args(name="l_in", shape=(None, SEQ_LENGTH, token_count))),
+    layers = [(InputLayer, args(name="l_in", shape=(None, SEQ_LENGTH, symbol_count))),
               (LSTMLayer, args(name="l_forward_1", num_units=N_HIDDEN, grad_clipping=GRAD_CLIP, 
                            nonlinearity=tanh)),
               (DropoutLayer, args(name="l_do_1", p=0.5)),
@@ -202,7 +218,7 @@ def make_network():
 
 def generate_tweet(network, min_length=MIN_LENGTH):
     chars = []
-    x = np.array([[np.concatenate([encode("START"), [0]])] * SEQ_LENGTH], dtype='float32')
+    x = np.array([[np.concatenate([encode("START")])] * SEQ_LENGTH], dtype='float32')
     for i in range(TWITTER_LIMIT):
         p = network.predict_proba(x).ravel()
         if i <= RANDOM_LENGTH:
@@ -228,10 +244,10 @@ def generate_tweet(network, min_length=MIN_LENGTH):
             x[0,SEQ_LENGTH-1,-1] = i / float(TWITTER_LIMIT - 1)
     return ''.join(chars)   
 
-# XXX could generate a bunch of tweets in parallel. Just drop stops and keep going.
+
 def generate_tweets(network, count, min_length=MIN_LENGTH):
     chars = []
-    x = np.array([[np.concatenate([encode("START"), [0]])] * SEQ_LENGTH]*count, dtype='float32')
+    x = np.array([[encode("START")] * SEQ_LENGTH]*count, dtype='float32')
     for i in range(TWITTER_LIMIT):
         p = network.predict_proba(x)
         if i <= RANDOM_LENGTH:
@@ -240,7 +256,7 @@ def generate_tweets(network, count, min_length=MIN_LENGTH):
             # but more comprehensible (in theory at least)
             p **= STODGINESS
             p /= p.sum(axis=1, keepdims=True)
-            tkns = np.random.choice(np.arange(symbol_count), p=p, axis=1)
+            tkns = np.array([np.random.choice(np.arange(symbol_count), p=x) for x in  p])
         else:
             # After RANDOM_LENGTH characters, just use the most likely character.
             tkns = np.argmax(p, axis=1)
@@ -248,13 +264,21 @@ def generate_tweets(network, count, min_length=MIN_LENGTH):
             # Convert STOP tokens to spaces
             # XXX need to use comprehension here since tkns_to_char is list or convert
             tkns[token_to_char[tkns] == "STOP"] = char_to_token[' ']
-        char = token_to_char[tkn]
+        char = token_to_char[tkns]
         chars.append(char)
         x[:,0:SEQ_LENGTH-1,:] = x[:,1:,:]
         x[:,SEQ_LENGTH-1,:] = 0
-        x[:,SEQ_LENGTH-1, tkn] = 1. 
+        x[:,SEQ_LENGTH-1, tkns] = 1. 
         x[:,SEQ_LENGTH-1,-1] = i / float(TWITTER_LIMIT - 1)
-    return [''.join(x) for x in transpose(chars)]
+    tweets = []
+    for ch in chars:
+        twt = []
+        for x in ch:
+            if x == "STOP":
+                break
+            twt.append(x)
+        tweets.append(''.join(twt))
+    return tweets
 
 def dump_tweets(network, count, path, param_path="network.params"):
     load_params(network, path=param_path)
@@ -263,6 +287,8 @@ def dump_tweets(network, count, path, param_path="network.params"):
         twt = generate_tweet(network).replace('\n', ' ')
         file.write(twt+'\n')
 
+
+dummy_data = [None] * CHUNK_SIZE * BATCH_SIZE
 if __name__ == '__main__':
     network = make_network()
     try:
@@ -270,7 +296,6 @@ if __name__ == '__main__':
     except:
         print("could not load network.params")
     try:
-        dummy_data = [None] * CHUNK_SIZE * BATCH_SIZE
         network.fit(dummy_data, dummy_data)
     except KeyboardInterrupt:
         pass    
